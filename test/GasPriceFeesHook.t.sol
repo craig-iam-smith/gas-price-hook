@@ -166,4 +166,125 @@ contract TestGasPriceFeesHook is Test, Deployers {
         assertGt(outputFromDecreasedFeeSwap, outputFromBaseFeeSwap);
         assertGt(outputFromBaseFeeSwap, outputFromIncreasedFeeSwap);
     }
+
+    function test_extremeGasPriceChanges() public {
+        // Set up our swap parameters
+        PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
+            .TestSettings({takeClaims: false, settleUsingBurn: false});
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -0.00001 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
+
+        // Initial state
+        assertEq(hook.movingAverageGasPrice(), 10 gwei);
+        assertEq(hook.movingAverageGasPriceCount(), 1);
+
+        // Extreme low gas price
+        vm.txGasPrice(1 gwei);
+        swapRouter.swap(key, params, testSettings, ZERO_BYTES);
+        
+        uint128 lowGasPrice = hook.movingAverageGasPrice();
+        assertLt(lowGasPrice, 10 gwei);
+
+        // Extreme high gas price
+        vm.txGasPrice(100 gwei);
+        swapRouter.swap(key, params, testSettings, ZERO_BYTES);
+        
+        uint128 highGasPrice = hook.movingAverageGasPrice();
+        assertGt(highGasPrice, lowGasPrice);
+    }
+
+    function test_consistentGasPrice() public {
+        PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
+            .TestSettings({takeClaims: false, settleUsingBurn: false});
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -0.00001 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
+
+        // Perform multiple swaps with the same gas price
+        for (uint i = 0; i < 10; i++) {
+            vm.txGasPrice(10 gwei);
+            swapRouter.swap(key, params, testSettings, ZERO_BYTES);
+        }
+
+        // Check that the moving average remains stable
+        assertEq(hook.movingAverageGasPrice(), 10 gwei);
+        assertEq(hook.movingAverageGasPriceCount(), 11); // 1 from setup + 10 from this test
+    }
+
+    function test_movingAverageCalculation() public {
+        PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
+            .TestSettings({takeClaims: false, settleUsingBurn: false});
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -0.00001 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
+
+        // Perform swaps with different gas prices
+        uint128[] memory gasPrices = new uint128[](5);
+        gasPrices[0] = 10 gwei; // Initial state
+        gasPrices[1] = 15 gwei;
+        gasPrices[2] = 8 gwei;
+        gasPrices[3] = 12 gwei;
+        gasPrices[4] = 20 gwei;
+
+        for (uint i = 1; i < gasPrices.length; i++) {
+            vm.txGasPrice(gasPrices[i]);
+            swapRouter.swap(key, params, testSettings, ZERO_BYTES);
+        }
+
+        // Calculate expected moving average
+        uint128 expectedAverage = 0;
+        for (uint i = 0; i < gasPrices.length; i++) {
+            expectedAverage += gasPrices[i];
+        }
+        expectedAverage /= uint128(gasPrices.length);
+
+        assertEq(hook.movingAverageGasPrice(), expectedAverage);
+        assertEq(hook.movingAverageGasPriceCount(), gasPrices.length);
+    }
+
+    function test_feeAdjustmentImpact() public {
+        PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
+            .TestSettings({takeClaims: false, settleUsingBurn: false});
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -0.001 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
+
+        // Perform swaps with different gas prices and compare outputs
+        uint256[] memory outputs = new uint256[](3);
+
+        // Baseline swap at average gas price
+        vm.txGasPrice(10 gwei);
+        uint256 balanceBefore = currency1.balanceOfSelf();
+        swapRouter.swap(key, params, testSettings, ZERO_BYTES);
+        outputs[0] = currency1.balanceOfSelf() - balanceBefore;
+
+        // Swap with higher gas price (lower fee)
+        vm.txGasPrice(20 gwei);
+        balanceBefore = currency1.balanceOfSelf();
+        swapRouter.swap(key, params, testSettings, ZERO_BYTES);
+        outputs[1] = currency1.balanceOfSelf() - balanceBefore;
+
+        // Swap with lower gas price (higher fee)
+        vm.txGasPrice(5 gwei);
+        balanceBefore = currency1.balanceOfSelf();
+        swapRouter.swap(key, params, testSettings, ZERO_BYTES);
+        outputs[2] = currency1.balanceOfSelf() - balanceBefore;
+
+        // Check that the outputs reflect the fee adjustments
+        assertGt(outputs[1], outputs[0], "Higher gas price should result in larger output");
+        assertLt(outputs[2], outputs[0], "Lower gas price should result in smaller output");
+    }
 }
